@@ -48,7 +48,53 @@
  N% = 67                \ N% is set to the number of bytes in the VDU table, so
                         \ we can loop through them below
 
- VSCAN = 57             \ Defines the split position in the split-screen mode
+ VSCAN = 56             \ Defines the split position in the split-screen mode
+                        \
+                        \ This is the value used if the current *TV setting is
+                        \ non-interlaced. If it's interlaced, this constant (and
+                        \ LINSCN's low-order count below) get patched at load
+                        \ time to 57 and 30 respectively - see ENTRY, where
+                        \ LINSCN+1 and VSCANOP+1 are overwritten once we know
+                        \ which state applies, and .LOAD, where the resident
+                        \ &55FF checksum this affects is patched to match.
+                        \
+                        \ To explain where these two values come from:
+                        \
+                        \ 57, paired with a T1 low-order count of 30, is the
+                        \ original game's value, giving a T1 reload of
+                        \ 57 * 256 + 30 = 14622. This is correct when CRTC
+                        \ register R8 (interlace and delay) is 1 ("interlace
+                        \ sync" mode, MOS's default for mode 4/5).
+                        \
+                        \ OSBYTE 144 (the routine behind *TV) doesn't poke R7/R8
+                        \ directly - it stores X and Y into MOS workspace, and
+                        \ it's the *next* mode change (the EQUB 22, 4 at the
+                        \ start of B%, below) that actually writes the CRTC
+                        \ registers, applying R7 = value + X + 1 and
+                        \ R8 = value EOR Y to MOS's mode 4 default table
+                        \ (R7 = 34, R8 = 1). ENTRY calls OSBYTE 144 with X = 255
+                        \ unconditionally (as the original code always did, to
+                        \ position the picture correctly) but leaves Y exactly
+                        \ as it was, using the paired-calls technique described
+                        \ in ENTRY, so whatever *TV setting was already in
+                        \ force before the game loaded is left untouched. With
+                        \ X = 255, R7 always comes out as 34 regardless of Y -
+                        \ but R8 comes out as 1 EOR 0 = 1 with interlace on,
+                        \ versus 1 EOR 1 = 0 with interlace off.
+                        \ So R8 genuinely differs depending on the current *TV
+                        \ setting, and the 6845's interlace sync mode is
+                        \ documented to alter how the vertical sync pulse is
+                        \ timed even when (as here) it isn't being used to
+                        \ double vertical resolution, which plausibly explains
+                        \ a shift on the order of one scan line in where the
+                        \ mode 4/mode 5 switch needs to fall. The exact size of
+                        \ that shift isn't easily derived by hand from the CRTC
+                        \ datasheet alone, so it was confirmed empirically
+                        \ against a real BBC Micro: with interlace on, the
+                        \ original value of 57 * 256 + 30 = 14622 is correct;
+                        \ with interlace off, it needs to be 14622 - 64 = 14558,
+                        \ which is 56 * 256 + 222. Hence VSCAN = 56 and a
+                        \ low-order count of 222 for the non-interlaced case
 
  POW = 15               \ Pulse laser power
 
@@ -385,7 +431,46 @@ ENDIF
 
  LDA #144               \ Call OSBYTE with A = 144, X = 255 and Y = 0 to move
  LDX #255               \ the screen down one line and turn screen interlace on
- JSR OSB
+ LDY #0
+ JSR OSBYTE
+
+ LDA #144               \ Repeat the above command, which has the effect of
+ LDX #255               \ setting the interlace to the original value, as the
+ JSR OSBYTE             \ OSBYTE call above returns the original setting in Y
+                        \
+                        \ OSBYTE 144 is the routine behind the *TV command: X is
+                        \ a signed vertical shift and Y is the interlace flag
+                        \ (Y = 0 selects interlace, Y = 1 selects non-interlace),
+                        \ and on exit, X and Y hold the PREVIOUS values, not the
+                        \ ones just set. The original code called OSB (which
+                        \ always sets Y = 0) with X = 255 to shift the screen
+                        \ down one character row and force interlace on. As
+                        \ Elite's screen is only 31 text rows (248 scan lines)
+                        \ high, well within a single 312-line field, there's no
+                        \ need for interlace, but rather than forcing it off
+                        \ unconditionally, the pair of calls above (borrowed
+                        \ from the technique used in the native BBC Master
+                        \ version of Elite) leaves it exactly as it was: the
+                        \ first call's forced Y = 0 is thrown away, but its
+                        \ side effect of returning the previous setting in Y is
+                        \ what the second call then uses as its own Y, setting
+                        \ it right back to whatever it was before. X = 255 gets
+                        \ applied both times regardless, so CRTC register R7
+                        \ (vertical sync position) ends up exactly where the
+                        \ original code left it, and the picture sits at the
+                        \ same vertical position as unmodified Elite regardless
+                        \ of *TV state.
+                        \
+                        \ This is a modification to the original game code, to
+                        \ support non-interlaced displays such as an RGB SCART
+                        \ capture/upscaler chain, while remaining a
+                        \ well-behaved game that respects whatever *TV setting
+                        \ is already in force rather than overriding it. This
+                        \ needs no spare byte of Elite's own workspace, as the
+                        \ same paired-calls technique is simply repeated
+                        \ wherever the interlace state is needed (see VSCAN
+                        \ below, and LOAD, where the checksum this affects
+                        \ gets patched to match)
 
  LDA #LO(B%)            \ Set the low byte of ZP(1 0) to point to the VDU code
  STA ZP                 \ table at B%
@@ -504,6 +589,24 @@ ENDIF
  JSR MVPG               \ Call MVPG to move and decrypt a page of memory from
                         \ TVT1code to &1100-&11FF
 
+ LDA #144               \ Now that LINSCN is resident at &1100, patch its two
+ LDX #255               \ timing constants to match the current *TV interlace
+ LDY #0                 \ setting. As above, Y on exit from this first call is
+ JSR OSBYTE             \ the interlace setting from before this pair of calls
+                        \ (0 for interlace, 1 for non-interlace, matching the
+                        \ table order below), so we can use it directly here
+
+ LDA VSCANLO,Y          \ Patch LINSCN+1 (the low-order T1 count, also used to
+ STA LINSCN+1           \ set DL) to 30 if interlaced, 222 if not (see VSCAN
+                        \ above for where these numbers come from)
+
+ LDA VSCANHI,Y          \ Patch VSCANOP+1 (the VSCAN high-order T1 count) to
+ STA VSCANOP+1          \ 57 if interlaced, 56 if not
+
+ LDA #144               \ Repeat the OSBYTE call to restore the interlace
+ LDX #255               \ setting, exactly as in ENTRY above (Y still holds
+ JSR OSBYTE             \ the value the first call above returned)
+
  LDA #&00               \ Set the following:
  STA ZP                 \
  LDA #&78               \   ZP(1 0) = &7800
@@ -546,8 +649,8 @@ ENDIF
  STA IRQ1V+1
 
  LDA #VSCAN             \ Set 6522 System VIA T1C-L timer 1 high-order counter
- STA VIA+&45            \ (SHEILA &45) to VSCAN (57) to start the T1 counter
-                        \ counting down from 14622 at a rate of 1 MHz
+ STA VIA+&45            \ (SHEILA &45) to VSCAN (56) to start the T1 counter
+                        \ counting down at a rate of 1 MHz (see VSCAN above)
 
  CLI                    \ Re-enable interrupts
 
@@ -662,6 +765,32 @@ ENDIF
 
 \ ******************************************************************************
 \
+\       Name: VSCANLO, VSCANHI
+\       Type: Variable
+\   Category: Loader
+\    Summary: Lookup tables for patching LINSCN's timing constants to match the
+\             current *TV interlace setting
+\
+\ ------------------------------------------------------------------------------
+\
+\ Indexed by the current *TV interlace setting (0 = interlace, 1 =
+\ non-interlace), as returned by the paired OSBYTE 144 calls in ENTRY. Used
+\ once at load time, after LINSCN becomes resident at &1100, to patch its two
+\ hardcoded timing constants to whichever pair is correct for the current *TV
+\ setting - see VSCAN for where these four numbers come from.
+\
+\ ******************************************************************************
+
+.VSCANLO
+
+ EQUB 30, 222           \ Low-order T1 counts: interlace, non-interlace
+
+.VSCANHI
+
+ EQUB 57, 56            \ VSCAN values: interlace, non-interlace
+
+\ ******************************************************************************
+\
 \       Name: CHECK
 \       Type: Subroutine
 \   Category: Copy protection
@@ -736,6 +865,26 @@ ENDIF
                         \ the T.CODE binary (the main docked code) to its load
                         \ address of &11E3
 
+ LDA #144               \ T.CODE has just been loaded fresh from disk, complete
+ LDX #255               \ with a checksum at &55FF that was computed at build
+ LDY #0                 \ time for one specific *TV interlace setting (see
+ JSR OSBYTE             \ elite-checksum.py). As in ENTRY, this pair of OSBYTE
+                        \ 144 calls leaves the interlace setting unchanged
+                        \ while giving us the current value in Y after the
+                        \ first call, so we can patch &55FF to whichever of
+                        \ the two build-time-computed values matches the
+                        \ setting that's actually in force now (and that
+                        \ LINSCN was patched to match, back in ENTRY), so the
+                        \ comparison below always passes regardless of *TV
+                        \ state
+
+ LDA CHK55FF,Y          \ Patch &55FF with the correct precomputed checksum for
+ STA &55FF              \ interlace (Y = 0) or non-interlace (Y = 1)
+
+ LDA #144               \ Repeat the OSBYTE call to restore the interlace
+ LDX #255               \ setting, exactly as in ENTRY above
+ JSR OSBYTE
+
  LDA #LO(S%+11)         \ Point BRKV to the fifth entry in the main docked
  STA BRKV               \ code's S% workspace, which contains JMP BRBR1
  LDA #HI(S%+11)
@@ -803,6 +952,32 @@ ENDIF
 
  JMP S%+3               \ Jump to the second entry in the main docked code's S%
                         \ workspace to start a new game
+
+\ ******************************************************************************
+\
+\       Name: CHK55FF
+\       Type: Variable
+\   Category: Loader
+\    Summary: Lookup table of precomputed &55FF checksums, one per *TV
+\             interlace setting
+\
+\ ------------------------------------------------------------------------------
+\
+\ Indexed by the current *TV interlace setting (0 = interlace, 1 =
+\ non-interlace), as returned by the paired OSBYTE 144 calls in LOAD. The
+\ value at &55FF in the docked code we just loaded was computed at build time
+\ assuming
+\ one specific pair of LINSCN timing constants (see elite-checksum.py); this
+\ table holds the correct checksum for both possible pairs, so LOAD can patch
+\ &55FF to match whichever one ENTRY actually patched LINSCN to use, whatever
+\ the current *TV setting turns out to be.
+\
+\ ******************************************************************************
+
+.CHK55FF
+
+ EQUB 0, 0              \ Placeholder values, patched into the assembled binary
+                        \ by elite-checksum.py: interlace, non-interlace
 
 .LTLI
 
@@ -2012,16 +2187,28 @@ ENDIF
                         \ the start of each vertical sync (i.e. when the screen
                         \ refresh starts)
 
- LDA #30                \ Set the line scan counter to a non-zero value, so
+ LDA #222               \ Set the line scan counter to a non-zero value, so
  STA DL                 \ routines like WSCAN can set DL to 0 and then wait for
                         \ it to change to non-zero to catch the vertical sync
+                        \
+                        \ This value only needs to be non-zero for DL's sake,
+                        \ but we also reuse it below as the T1C-L low-order
+                        \ count, so it's set to 222 rather than the original
+                        \ 30 to compensate for switching off interlace (see
+                        \ VSCAN above)
 
  STA VIA+&44            \ Set 6522 System VIA T1C-L timer 1 low-order counter
-                        \ (SHEILA &44) to 30
+                        \ (SHEILA &44) to the value we set above (222 or 30,
+                        \ depending on whether interlace is on or off - see
+                        \ ENTRY, where LINSCN+1 gets patched at load time to
+                        \ pick the correct value for the current *TV setting)
+
+.VSCANOP
 
  LDA #VSCAN             \ Set 6522 System VIA T1C-L timer 1 high-order counter
- STA VIA+&45            \ (SHEILA &45) to VSCAN (57) to start the T1 counter
-                        \ counting down from 14622 at a rate of 1 MHz
+ STA VIA+&45            \ (SHEILA &45) to the value we set above (56 or 57 -
+                        \ VSCANOP+1 gets patched at load time to match, for the
+                        \ same reason as LINSCN+1 above)
 
  LDA HFX                \ If HFX is non-zero, jump to VNT1 to set the mode 5
  BNE VNT1               \ palette instead of switching to mode 4, which will
