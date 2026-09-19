@@ -184,7 +184,7 @@ block_1100_interlace[linscn_offset] = 30
 block_1100_interlace[vscanop_offset] = 57
 
 block_1100_noninterlace = bytearray(block_1100)
-block_1100_noninterlace[linscn_offset] = 222
+block_1100_noninterlace[linscn_offset] = 238
 block_1100_noninterlace[vscanop_offset] = 56
 
 chk_interlace = calc_55ff_checksum(block_1100_interlace, tcode_data_block_scrambled)

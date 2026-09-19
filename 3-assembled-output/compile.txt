@@ -4848,7 +4848,7 @@ End macro FNE
      1B02   4C 00 0B   JMP &0B00
 .VSCANLO
      1B05   1E
-     1B06   DE
+     1B06   EE
 .VSCANHI
      1B07   39
      1B08   38
