@@ -734,7 +734,17 @@ ENDIF
 
 .VSCANLO
 
- EQUB 30, 222           \ Low-order T1 counts: interlace, non-interlace
+ EQUB 30, 238           \ Low-order T1 counts: interlace, non-interlace
+                        \
+                        \ The non-interlace value was refined from 222 to 238
+                        \ (i.e. the correction from the interlace timer reload
+                        \ is 48 ticks, not a flat 64) after testing at finer
+                        \ than one-scan-line granularity showed 222 left two
+                        \ small residual artifacts: a missing pixel at the
+                        \ bottom of the space view's right border, and a
+                        \ dotted white artifact on the HUD frame's left edge.
+                        \ 238 fixes both, confirmed on real BBC Model B
+                        \ hardware via OSSC
 
 .VSCANHI
 
